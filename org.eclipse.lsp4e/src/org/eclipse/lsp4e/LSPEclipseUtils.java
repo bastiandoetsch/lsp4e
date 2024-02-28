@@ -17,6 +17,7 @@
  *  Markus Ofterdinger (SAP SE) - Bug 552140 - NullPointerException in LSP4E
  *  Rubén Porras Campo (Avaloq) - Bug 576425 - Support Remote Files
  *  Pierre-Yves Bigourdan <pyvesdev@gmail.com> - Issue 29
+ *  Bastian Doetsch (Snyk Ltd)
  *******************************************************************************/
 package org.eclipse.lsp4e;
 
@@ -92,7 +93,9 @@ import org.eclipse.lsp4e.ui.Messages;
 import org.eclipse.lsp4e.ui.UI;
 import org.eclipse.lsp4j.CallHierarchyPrepareParams;
 import org.eclipse.lsp4j.Color;
+import org.eclipse.lsp4j.CompletionContext;
 import org.eclipse.lsp4j.CompletionParams;
+import org.eclipse.lsp4j.CompletionTriggerKind;
 import org.eclipse.lsp4j.CreateFile;
 import org.eclipse.lsp4j.DefinitionParams;
 import org.eclipse.lsp4j.DeleteFile;
@@ -151,6 +154,8 @@ import org.eclipse.ui.texteditor.AbstractTextEditor;
 import org.eclipse.ui.texteditor.IDocumentProvider;
 import org.eclipse.ui.texteditor.ITextEditor;
 
+import com.google.common.primitives.Chars;
+
 /**
  * Some utility methods to convert between Eclipse and LS-API types
  */
@@ -181,7 +186,29 @@ public final class LSPEclipseUtils {
 	}
 
 	public static int toOffset(Position position, IDocument document) throws BadLocationException {
-		return document.getLineOffset(position.getLine()) + position.getCharacter();
+		var line = position.getLine();
+		var character = position.getCharacter();
+
+		/*
+		 * The LSP spec allow for positions to specify the next line if a line should be
+		 * included completely, specifying the first character of the following line. If
+		 * this is at the end of the document, we therefore take the last document line
+		 * and set the character to line length - 1 (to remove delimiter)
+		 */
+		var zeroBasedDocumentLines = Math.max(0, document.getNumberOfLines() - 1);
+		if (zeroBasedDocumentLines < position.getLine()) {
+			line = zeroBasedDocumentLines;
+			character = getLineLength(document, line);
+		} else {
+			// We just take the line length to be more forgiving and adhere to the LSP spec.
+			character = Math.min(getLineLength(document, line), position.getCharacter());
+		}
+
+		return document.getLineOffset(line) + character;
+	}
+
+	private static int getLineLength(IDocument document, int line) throws BadLocationException {
+		return Math.max(0, document.getLineLength(line));
 	}
 
 	public static boolean isOffsetInRange(int offset, Range range, IDocument document) {
@@ -194,10 +221,25 @@ public final class LSPEclipseUtils {
 		}
 	}
 
-	public static CompletionParams toCompletionParams(URI fileUri, int offset, IDocument document)
+	public static CompletionParams toCompletionParams(URI fileUri, int offset, IDocument document, char[] completionTriggerChars)
 			throws BadLocationException {
 		Position start = toPosition(offset, document);
 		final var param = new CompletionParams();
+		if (document.getLength() > 0) {
+			try {
+				int positionCharacterOffset = offset > 0 ? offset-1 : offset;
+				String positionCharacter = document.get(positionCharacterOffset, 1);
+				if (Chars.contains(completionTriggerChars, positionCharacter.charAt(0))) {
+					param.setContext(new CompletionContext(CompletionTriggerKind.TriggerCharacter, positionCharacter));
+				} else {
+					// According to LSP 3.17 specification: the triggerCharacter in CompletionContext is undefined if
+					// triggerKind != CompletionTriggerKind.TriggerCharacter
+					param.setContext(new CompletionContext(CompletionTriggerKind.Invoked));
+				}
+			} catch (BadLocationException e) {
+				LanguageServerPlugin.logError(e);
+			}
+		}
 		param.setPosition(start);
 		param.setTextDocument(toTextDocumentIdentifier(fileUri));
 		return param;
@@ -313,7 +355,7 @@ public final class LSPEclipseUtils {
 
 	}
 
-	private static ITextFileBuffer toBuffer(IDocument document) {
+	public static ITextFileBuffer toBuffer(IDocument document) {
 		ITextFileBufferManager bufferManager = FileBuffers.getTextFileBufferManager();
 		if (bufferManager == null)
 			return null;
@@ -479,10 +521,25 @@ public final class LSPEclipseUtils {
 					// Must be a bad location: we bail out to avoid corrupting the document.
 					throw new BadLocationException("Invalid location information found applying edits"); //$NON-NLS-1$
 				}
-
 				// check if that edit would actually change the document
-				if (!document.get(offset, length).equals(textEdit.getNewText()))
-					edit.addChild(new ReplaceEdit(offset, length, textEdit.getNewText()));
+				var newText = textEdit.getNewText();
+				if (!document.get(offset, length).equals(newText)) {
+					if (newText.length() > 0) {
+						var zeroBasedDocumentLines = Math.max(0, document.getNumberOfLines() - 1);
+						var endLine = textEdit.getRange().getEnd().getLine();
+						endLine = endLine > zeroBasedDocumentLines ? zeroBasedDocumentLines : endLine;
+						// Do not split "\r\n" line ending:
+						if ("\r\n".equals(document.getLineDelimiter(endLine))) { //$NON-NLS-1$;
+							// if last char in the newText is a carriage return:
+							if ('\r' == newText.charAt(newText.length()-1) && offset + length < document.getLength()) {
+								// replace the whole line:
+								newText = newText + '\n';
+								length++;
+							}
+						}
+					}
+					edit.addChild(new ReplaceEdit(offset, length, newText));
+				}
 			}
 		}
 
@@ -551,7 +608,7 @@ public final class LSPEclipseUtils {
 	}
 
 	@Nullable
-	private static IDocument getDocument(URI uri) {
+	public static IDocument getDocument(URI uri) {
 		if (uri == null) {
 			return null;
 		}
@@ -559,7 +616,7 @@ public final class LSPEclipseUtils {
 		if (resource != null) {
 			return getDocument(resource);
 		}
-	
+
 		IDocument document = null;
 		IFileStore store = null;
 		try {
@@ -937,15 +994,18 @@ public final class LSPEclipseUtils {
 			.map(LSPEclipseUtils::getDocument)
 			.filter(Objects::nonNull)
 			.findFirst();
+
 		doc.ifPresent(document -> {
-			try {
-				LSPEclipseUtils.applyEdits(document, firstDocumentEdits);
-			} catch (BadLocationException ex) {
-				LanguageServerPlugin.logError(ex);
-			}
+			UI.getDisplay().syncExec(() -> {
+				try {
+					LSPEclipseUtils.applyEdits(document, firstDocumentEdits);
+				} catch (BadLocationException ex) {
+					LanguageServerPlugin.logError(ex);
+				}
+			});
 		});
 		return doc.isPresent();
-	} 
+	}
 
 	/**
 	 * Returns a ltk {@link CompositeChange} from a lsp {@link WorkspaceEdit}.
@@ -1135,7 +1195,8 @@ public final class LSPEclipseUtils {
 	}
 
 	@Nullable public static URI toUri(@NonNull IFileBuffer buffer) {
-		IFile res = ResourcesPlugin.getWorkspace().getRoot().getFile(buffer.getLocation());
+		IPath bufferLocation = buffer.getLocation();
+		IFile res = bufferLocation != null && bufferLocation.segmentCount() > 1 ? ResourcesPlugin.getWorkspace().getRoot().getFile(buffer.getLocation()) : null;
 		if (res != null) {
 			URI uri = toUri(res);
 			if (uri != null) {
@@ -1382,13 +1443,15 @@ public final class LSPEclipseUtils {
 			return toUri(fileEditorInput.getFile());
 		}
 		if (editorInput instanceof IURIEditorInput uriEditorInput) {
-			return toUri(Path.fromPortableString((uriEditorInput.getURI()).getPath()));
+			URI uri = uriEditorInput.getURI();
+			return uri.getPath() != null ? toUri(Path.fromPortableString(uri.getPath())) : uri;
 		}
 		return null;
 	}
 
 	public static URI toUri(String uri) {
-		return toUri(Path.fromPortableString(URI.create(uri).getPath()));
+		URI initialUri = URI.create(uri);
+		return FILE_SCHEME.equals(initialUri.getScheme()) ? toUri(Path.fromPortableString(initialUri.getPath())) : initialUri;
 	}
 
 	/**

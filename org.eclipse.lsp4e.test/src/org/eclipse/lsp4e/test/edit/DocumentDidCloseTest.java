@@ -23,9 +23,9 @@ import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.lsp4e.LSPEclipseUtils;
-import org.eclipse.lsp4e.LanguageServiceAccessor;
-import org.eclipse.lsp4e.test.AllCleanRule;
-import org.eclipse.lsp4e.test.TestUtils;
+import org.eclipse.lsp4e.LanguageServers;
+import org.eclipse.lsp4e.test.utils.AllCleanRule;
+import org.eclipse.lsp4e.test.utils.TestUtils;
 import org.eclipse.lsp4e.tests.mock.MockLanguageServer;
 import org.eclipse.lsp4e.ui.UI;
 import org.eclipse.lsp4j.DidCloseTextDocumentParams;
@@ -48,7 +48,7 @@ public class DocumentDidCloseTest {
 		// Force LS to initialize and open file
 		IDocument document = LSPEclipseUtils.getDocument(testFile);
 		assertNotNull(document);
-		LanguageServiceAccessor.getLanguageServers(document, capabilites -> Boolean.TRUE);
+		LanguageServers.forDocument(document).anyMatching();
 
 		final var didCloseExpectation = new CompletableFuture<DidCloseTextDocumentParams>();
 		MockLanguageServer.INSTANCE.setDidCloseCallback(didCloseExpectation);
@@ -65,7 +65,7 @@ public class DocumentDidCloseTest {
 		IEditorPart editor = IDE.openEditorOnFileStore(UI.getActivePage(), EFS.getStore(testFile.toURI()));
 
 		// Force LS to initialize and open file
-		LanguageServiceAccessor.getLanguageServers(LSPEclipseUtils.getDocument(editor.getEditorInput()), capabilites -> Boolean.TRUE);
+		LanguageServers.forDocument(LSPEclipseUtils.getDocument(editor.getEditorInput())).anyMatching();
 
 		final var didCloseExpectation = new CompletableFuture<DidCloseTextDocumentParams>();
 		MockLanguageServer.INSTANCE.setDidCloseCallback(didCloseExpectation);
@@ -76,5 +76,4 @@ public class DocumentDidCloseTest {
 		assertNotNull(lastChange.getTextDocument());
 		assertEquals(LSPEclipseUtils.toUri(testFile).toString(), lastChange.getTextDocument().getUri());
 	}
-
 }

@@ -11,8 +11,7 @@
  *******************************************************************************/
 package org.eclipse.lsp4e.test.edit;
 
-
-import static org.eclipse.lsp4e.test.TestUtils.waitForAndAssertCondition;
+import static org.eclipse.lsp4e.test.utils.TestUtils.waitForAndAssertCondition;
 import static org.junit.Assert.assertNotNull;
 
 import org.eclipse.core.resources.IFile;
@@ -21,9 +20,9 @@ import org.eclipse.core.runtime.CoreException;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.lsp4e.LSPEclipseUtils;
-import org.eclipse.lsp4e.LanguageServiceAccessor;
-import org.eclipse.lsp4e.test.AllCleanRule;
-import org.eclipse.lsp4e.test.TestUtils;
+import org.eclipse.lsp4e.LanguageServers;
+import org.eclipse.lsp4e.test.utils.AllCleanRule;
+import org.eclipse.lsp4e.test.utils.TestUtils;
 import org.eclipse.lsp4e.tests.mock.MockLanguageServer;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.texteditor.AbstractTextEditor;
@@ -53,7 +52,7 @@ public class DocumentRevertAndCloseTest {
 		// Force LS to initialize and open file
 		IDocument document = LSPEclipseUtils.getDocument(testFile);
 		assertNotNull(document);
-		LanguageServiceAccessor.getLanguageServers(document, capabilites -> Boolean.TRUE);
+		LanguageServers.forDocument(document).anyMatching();
 
 		viewer.getDocument().replace(0, 0, "Bye!");
 		((AbstractTextEditor)editor).doRevertToSaved();
@@ -61,5 +60,4 @@ public class DocumentRevertAndCloseTest {
 
 		waitForAndAssertCondition(3_000, () -> !MockLanguageServer.INSTANCE.isRunning());
 	}
-
 }

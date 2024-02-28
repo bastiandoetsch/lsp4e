@@ -26,8 +26,8 @@ import org.eclipse.jface.text.Region;
 import org.eclipse.jface.text.hyperlink.IHyperlink;
 import org.eclipse.lsp4e.LSPEclipseUtils;
 import org.eclipse.lsp4e.operations.documentLink.DocumentLinkDetector;
-import org.eclipse.lsp4e.test.AllCleanRule;
-import org.eclipse.lsp4e.test.TestUtils;
+import org.eclipse.lsp4e.test.utils.AllCleanRule;
+import org.eclipse.lsp4e.test.utils.TestUtils;
 import org.eclipse.lsp4e.tests.mock.MockLanguageServer;
 import org.eclipse.lsp4e.ui.UI;
 import org.eclipse.lsp4j.DocumentLink;
@@ -83,6 +83,7 @@ public class DocumentLinkTest {
 		File file = TestUtils.createTempFile("testDocumentLinkExternalFile", ".lspt");
 		ITextEditor editor = (ITextEditor) IDE.openInternalEditorOnFileStore(UI.getActivePage(), EFS.getStore(file.toURI()));
 		ITextViewer viewer = LSPEclipseUtils.getTextViewer(editor);
+		viewer.getDocument().set("Long enough dummy content to match ranges");
 
 		IHyperlink[] hyperlinks = documentLinkDetector.detectHyperlinks(viewer, new Region(13, 0), true);
 		assertEquals(1, hyperlinks.length);

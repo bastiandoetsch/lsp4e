@@ -18,8 +18,10 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 
 import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.jdt.annotation.NonNull;
 import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.IRegion;
@@ -37,6 +39,7 @@ import org.eclipse.jface.text.source.projection.ProjectionViewer;
 import org.eclipse.lsp4e.LSPEclipseUtils;
 import org.eclipse.lsp4e.LanguageServers;
 import org.eclipse.lsp4j.FoldingRange;
+import org.eclipse.lsp4j.FoldingRangeKind;
 import org.eclipse.lsp4j.FoldingRangeRequestParams;
 import org.eclipse.lsp4j.ServerCapabilities;
 import org.eclipse.swt.graphics.FontMetrics;
@@ -55,6 +58,7 @@ public class LSPFoldingReconcilingStrategy
 	private IDocument document;
 	private ProjectionAnnotationModel projectionAnnotationModel;
 	private ProjectionViewer viewer;
+	private @NonNull List<CompletableFuture<List<FoldingRange>>> requests = List.of();
 
 	/**
 	 * A FoldingAnnotation is a {@link ProjectionAnnotation} it is folding and
@@ -125,9 +129,11 @@ public class LSPFoldingReconcilingStrategy
 		}
 		final var identifier = LSPEclipseUtils.toTextDocumentIdentifier(uri);
 		final var params = new FoldingRangeRequestParams(identifier);
-		LanguageServers.forDocument(theDocument).withCapability(ServerCapabilities::getFoldingRangeProvider)
-				.computeAll(server -> server.getTextDocumentService().foldingRange(params))
-				.forEach(ranges -> ranges.thenAccept(this::applyFolding));
+		// cancel previous requests
+		requests.forEach(request -> request.cancel(true));
+		requests = LanguageServers.forDocument(theDocument).withCapability(ServerCapabilities::getFoldingRangeProvider)
+				.computeAll(server -> server.getTextDocumentService().foldingRange(params));
+		requests.forEach(ranges -> ranges.thenAccept(this::applyFolding));
 	}
 
 	private void applyFolding(List<FoldingRange> ranges) {
@@ -146,7 +152,7 @@ public class LSPFoldingReconcilingStrategy
 				Collections.sort(ranges, Comparator.comparing(FoldingRange::getEndLine));
 				for (FoldingRange foldingRange : ranges) {
 					updateAnnotation(modifications, deletions, existing, additions, foldingRange.getStartLine(),
-							foldingRange.getEndLine());
+							foldingRange.getEndLine(), FoldingRangeKind.Imports.equals(foldingRange.getKind()));
 				}
 			}
 		} catch (BadLocationException e) {
@@ -154,13 +160,14 @@ public class LSPFoldingReconcilingStrategy
 		}
 
 		// be sure projection has not been disabled
-		if (projectionAnnotationModel != null) {
+		var theProjectionAnnotationModel = projectionAnnotationModel; //use local variable to prevent possible NPE
+		if (theProjectionAnnotationModel != null) {
 			if (!existing.isEmpty()) {
 				deletions.addAll(existing);
 			}
 			// send the calculated updates to the annotations to the
 			// annotation model
-			projectionAnnotationModel.modifyAnnotations(deletions.toArray(new Annotation[1]), additions,
+			theProjectionAnnotationModel.modifyAnnotations(deletions.toArray(new Annotation[1]), additions,
 					modifications.toArray(new Annotation[0]));
 		}
 	}
@@ -199,8 +206,10 @@ public class LSPFoldingReconcilingStrategy
 
 	@Override
 	public void projectionEnabled() {
-		if (viewer != null) {
-			projectionAnnotationModel = viewer.getProjectionAnnotationModel();
+		//prevent NPE on concurrent access on viewer:
+		var theViewer = viewer;
+		if (theViewer != null) {
+			projectionAnnotationModel = theViewer.getProjectionAnnotationModel();
 		}
 	}
 
@@ -222,7 +231,7 @@ public class LSPFoldingReconcilingStrategy
 	 * @throws BadLocationException
 	 */
 	private void updateAnnotation(List<Annotation> modifications, List<FoldingAnnotation> deletions,
-			List<FoldingAnnotation> existing, Map<Annotation, Position> additions, int line, Integer endLineNumber)
+			List<FoldingAnnotation> existing, Map<Annotation, Position> additions, int line, Integer endLineNumber, boolean collapsedByDefault)
 			throws BadLocationException {
 		int startOffset = document.getLineOffset(line);
 		int endOffset = document.getLineOffset(endLineNumber) + document.getLineLength(endLineNumber);
@@ -231,7 +240,7 @@ public class LSPFoldingReconcilingStrategy
 			FoldingAnnotation existingAnnotation = existing.remove(existing.size() - 1);
 			updateAnnotations(existingAnnotation, newPos, modifications, deletions);
 		} else {
-			additions.put(new FoldingAnnotation(false), newPos);
+			additions.put(new FoldingAnnotation(collapsedByDefault), newPos);
 		}
 	}
 
@@ -255,8 +264,9 @@ public class LSPFoldingReconcilingStrategy
 			// if a new position can be calculated then update the position of
 			// the annotation,
 			// else the annotation needs to be deleted
-			if (newPos != null && newPos.length > 0 && projectionAnnotationModel != null) {
-				Position oldPos = projectionAnnotationModel.getPosition(foldingAnnotation);
+			var theProjectionAnnotationModel = projectionAnnotationModel;
+			if (newPos != null && newPos.length > 0 && theProjectionAnnotationModel != null) {
+				Position oldPos = theProjectionAnnotationModel.getPosition(foldingAnnotation);
 				// only update the position if we have to
 				if (!newPos.equals(oldPos)) {
 					oldPos.setOffset(newPos.offset);
@@ -302,7 +312,7 @@ public class LSPFoldingReconcilingStrategy
 
 	@Override
 	public void reconcile(DirtyRegion dirtyRegion, IRegion partition) {
-		// Do nothing
+		reconcile(dirtyRegion);
 	}
 
 	@Override

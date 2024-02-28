@@ -12,14 +12,13 @@ import static org.junit.Assert.assertArrayEquals;
 
 import java.util.Arrays;
 import java.util.List;
-import java.util.concurrent.ExecutionException;
 
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.jface.text.ITextViewer;
-import org.eclipse.lsp4e.test.AllCleanRule;
-import org.eclipse.lsp4e.test.TestUtils;
+import org.eclipse.lsp4e.test.utils.AllCleanRule;
+import org.eclipse.lsp4e.test.utils.TestUtils;
 import org.eclipse.lsp4e.tests.mock.MockLanguageServer;
 import org.eclipse.lsp4j.SemanticTokens;
 import org.eclipse.swt.custom.StyleRange;
@@ -49,7 +48,7 @@ public class SemanticHighlightReconcilerStrategyTest {
 	}
 
 	@Test
-	public void testKeyword() throws InterruptedException, ExecutionException, CoreException {
+	public void testKeyword() throws CoreException {
 		SemanticTokens semanticTokens = new SemanticTokens();
 		semanticTokens.setData(SemanticTokensTestUtil.keywordSemanticTokens());
 

@@ -52,6 +52,7 @@ import org.eclipse.core.resources.IResourceChangeListener;
 import org.eclipse.core.resources.IResourceDelta;
 import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.core.resources.WorkspaceJob;
+import org.eclipse.core.runtime.Adapters;
 import org.eclipse.core.runtime.Assert;
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.core.runtime.IPath;
@@ -65,6 +66,8 @@ import org.eclipse.jdt.annotation.NonNull;
 import org.eclipse.jdt.annotation.Nullable;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.lsp4e.LanguageServersRegistry.LanguageServerDefinition;
+import org.eclipse.lsp4e.internal.CancellationUtil;
+import org.eclipse.lsp4e.internal.FileBufferListenerAdapter;
 import org.eclipse.lsp4e.internal.SupportedFeatures;
 import org.eclipse.lsp4e.server.StreamConnectionProvider;
 import org.eclipse.lsp4e.ui.Messages;
@@ -143,7 +146,7 @@ public class LanguageServerWrapper {
 	@NonNull
 	public final LanguageServerDefinition serverDefinition;
 	@Nullable
-	protected final IProject initialProject;
+	public final IProject initialProject;
 	@NonNull
 	protected Map<@NonNull URI, @NonNull DocumentContentSynchronizer> connectedDocuments;
 	@Nullable
@@ -240,9 +243,33 @@ public class LanguageServerWrapper {
 	 * @throws IOException
 	 */
 	public synchronized void start() throws IOException {
+		start(false);
+	}
+
+	/**
+	 * Restarts a language server. If language server is not started, calling this
+	 * method is the same as calling {@link #start()}.
+	 *
+	 * @throws IOException
+	 * @since 0.18
+	 */
+	public synchronized void restart() throws IOException {
+		start(true);
+	}
+
+	/**
+	 * Starts a language server and triggers initialization. If language server is
+	 * started and active and restart is not forced, does nothing.
+	 * If language server is inactive or restart is forced, restart it.
+	 *
+	 * @param forceRestart
+	 *            whether to restart the language server, even it is not inactive.
+	 * @throws IOException
+	 */
+	private synchronized void start(boolean forceRestart) throws IOException {
 		final var filesToReconnect = new HashMap<URI, IDocument>();
 		if (this.languageServer != null) {
-			if (isActive()) {
+			if (isActive() && !forceRestart) {
 				return;
 			} else {
 				for (Entry<URI, DocumentContentSynchronizer> entry : this.connectedDocuments.entrySet()) {
@@ -320,10 +347,13 @@ public class LanguageServerWrapper {
 				FileBuffers.getTextFileBufferManager().addFileBufferListener(fileBufferListener);
 			}).exceptionally(e -> {
 				LanguageServerPlugin.logError(e);
-				initializeFuture.completeExceptionally(e);
 				stop();
-				return null;
+				throw new RuntimeException(e);
 			});
+			if (this.initializeFuture.isCompletedExceptionally()) {
+				// This might happen if an exception occurred and stop() was called before this.initializeFuture was assigned
+				this.initializeFuture = null;
+			}
 		}
 	}
 
@@ -344,6 +374,11 @@ public class LanguageServerWrapper {
 
 		// no then...Async future here as we want this chain of operation to be sequential and "atomic"-ish
 		return languageServer.initialize(initParams);
+	}
+
+	@Nullable
+	public ProcessHandle getProcessHandle() {
+		return Adapters.adapt(lspStreamProvider, ProcessHandle.class);
 	}
 
 	private ClientInfo getClientInfo(String name) {
@@ -389,7 +424,7 @@ public class LanguageServerWrapper {
 	/**
 	 * @return whether the underlying connection to language server is still active
 	 */
-	public boolean isActive() {
+	public synchronized boolean isActive() {
 		return this.launcherFuture != null && !this.launcherFuture.isDone() && !this.launcherFuture.isCancelled();
 	}
 
@@ -433,6 +468,11 @@ public class LanguageServerWrapper {
 			return;
 		}
 		removeStopTimerTask();
+
+		if (this.languageClient != null) {
+			this.languageClient.dispose();
+		}
+
 		if (this.initializeFuture != null) {
 			this.initializeFuture.cancel(true);
 			this.initializeFuture = null;
@@ -454,7 +494,7 @@ public class LanguageServerWrapper {
 				} catch (InterruptedException ex) {
 					Thread.currentThread().interrupt();
 				} catch (Exception ex) {
-					LanguageServerPlugin.logError(ex);
+					LanguageServerPlugin.logError(ex.getClass().getSimpleName() + " occurred during shutdown of " + languageServerInstance, ex); //$NON-NLS-1$
 				}
 			}
 
@@ -589,7 +629,7 @@ public class LanguageServerWrapper {
 				TextDocumentSyncKind syncKind = initializeFuture == null ? null
 						: serverCapabilities.getTextDocumentSync().map(Functions.identity(), TextDocumentSyncOptions::getChange);
 				final var listener = new DocumentContentSynchronizer(this, languageServer, theDocument, syncKind);
-				theDocument.addDocumentListener(listener);
+				theDocument.addPrenotifiedDocumentListener(listener);
 				LanguageServerWrapper.this.connectedDocuments.put(uri, listener);
 			}
 		}).thenApply(theVoid -> this);
@@ -603,7 +643,7 @@ public class LanguageServerWrapper {
 		DocumentContentSynchronizer documentListener = this.connectedDocuments.remove(uri);
 		CompletableFuture<Void> documentClosedFuture = null;
 		if (documentListener != null) {
-			documentListener.getDocument().removeDocumentListener(documentListener);
+			documentListener.getDocument().removePrenotifiedDocumentListener(documentListener);
 			documentClosedFuture = documentListener.documentClosed();
 		}
 		if (this.connectedDocuments.isEmpty()) {
@@ -797,7 +837,9 @@ public class LanguageServerWrapper {
 		} catch (TimeoutException e) {
 			LanguageServerPlugin.logError("LanguageServer not initialized within 10s", e); //$NON-NLS-1$
 		} catch (ExecutionException | CancellationException e) {
-			LanguageServerPlugin.logError(e);
+			if (!CancellationUtil.isRequestCancelledException(e)) { // do not report error if the server has cancelled the request
+				LanguageServerPlugin.logError(e);
+			}
 		} catch (InterruptedException e) {
 			Thread.currentThread().interrupt();
 			LanguageServerPlugin.logError(e);
@@ -975,7 +1017,10 @@ public class LanguageServerWrapper {
 		}
 	}
 
-	int getVersion(URI uri) {
+	/**
+	 * return the TextDocument version, suitable to build a TextDocumentIndentifier
+	 */
+	public int getTextDocumentVersion(URI uri) {
 		DocumentContentSynchronizer documentContentSynchronizer = connectedDocuments.get(uri);
 		if (documentContentSynchronizer != null) {
 			return documentContentSynchronizer.getVersion();
@@ -999,6 +1044,18 @@ public class LanguageServerWrapper {
 			return true;
 		}
 		return serverDefinition.isSingleton || supportsWorkspaceFolderCapability();
+	}
+
+	@Override
+	public String toString() {
+		final var ph = getProcessHandle();
+		return getClass().getSimpleName() + '@' + Integer.toHexString(System.identityHashCode(this)) //
+				+ " [serverId=" + serverDefinition.id //$NON-NLS-1$
+				+ ", initialPath=" + initialPath //$NON-NLS-1$
+				+ ", initialProject=" + initialProject //$NON-NLS-1$
+				+ ", isActive=" + isActive() //$NON-NLS-1$
+				+ ", pid=" + (ph == null ? null : ph.pid()) //$NON-NLS-1$
+				+ ']';
 	}
 
 	/**
